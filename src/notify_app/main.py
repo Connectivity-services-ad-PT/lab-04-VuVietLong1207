@@ -8,33 +8,24 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-
-SERVICE_NAME = os.getenv("SERVICE_NAME", "iot-ingestion")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "notification-service")
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "0.4.0")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "local-dev-token")
-
+NOTIFY_PROVIDER_TOKEN = os.getenv("NOTIFY_PROVIDER_TOKEN", "mock_secret_token_abcd1234")
 
 app = FastAPI(
-    title="FIT4110 Lab 04 - IoT Ingestion Service",
+    title="FIT4110 Lab 04 - Smart Campus Notification Service",
     version=SERVICE_VERSION,
     description=(
-        "Dockerized IoT Ingestion API aligned with the Lab 03 OpenAPI/Postman contract."
+        "Dockerized Notification API aligned with the Lab 03 OpenAPI/Postman contract."
     ),
 )
 
 
-class SensorMetric(str, Enum):
-    temperature = "temperature"
-    humidity = "humidity"
-    motion = "motion"
-    smoke = "smoke"
-
-
-class SensorUnit(str, Enum):
-    celsius = "celsius"
-    percent = "percent"
-    boolean = "boolean"
-    ppm = "ppm"
+class NotificationChannel(str, Enum):
+    email = "email"
+    sms = "sms"
+    fcm = "fcm"
 
 
 class ProblemDetails(BaseModel):
@@ -51,39 +42,33 @@ class HealthResponse(BaseModel):
     version: str
 
 
-class SensorReadingCreate(BaseModel):
-    device_id: str = Field(..., min_length=3, examples=["ESP32-LAB-A01"])
-    metric: SensorMetric = Field(..., examples=["temperature"])
-    value: float = Field(
-        ...,
-        ge=-40,
-        le=80,
-        description="Boundary range used in Lab 03 and Lab 04: -40 to 80.",
-        examples=[31.5],
+class NotificationPayload(BaseModel):
+    recipient: str = Field(
+        ..., 
+        min_length=3, 
+        examples=["student01@dainam.edu.vn", "+84912345678"],
+        description="Địa chỉ email hoặc số điện thoại định dạng chuẩn nhận thông báo."
     )
-    unit: Optional[SensorUnit] = Field(default=None, examples=["celsius"])
-    timestamp: str = Field(..., examples=["2026-05-13T08:30:00+07:00"])
+    channel: NotificationChannel = Field(..., examples=["email"])
+    title: str = Field(
+        ..., 
+        min_length=1, 
+        max_length=100, 
+        description="Boundary check: Tiêu đề không vượt quá 100 ký tự.",
+        examples=["Cảnh báo nhiệt độ phòng Lab A01"]
+    )
+    body: str = Field(..., min_length=1, examples=["Phòng Lab A01 vượt ngưỡng 31.5°C."])
 
 
-class SensorReading(BaseModel):
-    reading_id: str
-    device_id: str
-    metric: SensorMetric
-    value: float
-    unit: Optional[SensorUnit] = None
-    timestamp: str
+class NotificationCreatedResponse(BaseModel):
+    notification_id: str
+    recipient: str
+    channel: NotificationChannel
+    status: str
     created_at: str
 
 
-class SensorReadingCreated(BaseModel):
-    reading_id: str
-    device_id: str
-    metric: SensorMetric
-    accepted: bool
-    created_at: str
-
-
-READINGS: List[Dict] = []
+NOTIFICATIONS_LOG: List[Dict] = []
 
 
 def build_problem(
@@ -141,11 +126,11 @@ async def validation_exception_handler(
     detail = f"{location}: {message}" if location else message
 
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_400_BAD_REQUEST,
         content=build_problem(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            title="Validation error",
-            detail=detail,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            title="Bad Request - Invalid Payload",
+            detail=f"Dữ liệu truyền vào không vượt qua bộ lọc kiểm tra: {detail}",
             instance=str(request.url.path),
             problem_type="https://smart-campus.local/problems/validation-error",
         ),
@@ -182,9 +167,9 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def next_reading_id() -> str:
+def next_notification_id() -> str:
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"R-{today}-{len(READINGS) + 1:04d}"
+    return f"NTF-{today}-{len(NOTIFICATIONS_LOG) + 1:04d}"
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -197,60 +182,59 @@ def health() -> HealthResponse:
 
 
 @app.post(
-    "/readings",
-    response_model=SensorReadingCreated,
-    status_code=status.HTTP_201_CREATED,
+    "/api/v1/notifications",
+    response_model=NotificationCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(verify_bearer_token)],
     responses={
         401: {"model": ProblemDetails},
-        422: {"model": ProblemDetails},
-        429: {"model": ProblemDetails},
+        400: {"model": ProblemDetails},
     },
 )
-def create_reading(payload: SensorReadingCreate, response: Response) -> SensorReadingCreated:
-    if payload.metric == SensorMetric.temperature and payload.value >= 70:
-        response.headers["X-Warning"] = "high-temperature"
-
-    reading_id = next_reading_id()
+def create_notification(payload: NotificationPayload) -> NotificationCreatedResponse:
+    notification_id = next_notification_id()
     created_at = now_iso()
 
+    if NOTIFY_PROVIDER_TOKEN == "mock_secret_token_abcd1234":
+        print(f"[MOCK PROVIDER LOG] Gửi kênh [{payload.channel.value}] đến <{payload.recipient}> thành công!")
+
     item = {
-        "reading_id": reading_id,
-        "device_id": payload.device_id,
-        "metric": payload.metric.value,
-        "value": payload.value,
-        "unit": payload.unit.value if payload.unit else None,
-        "timestamp": payload.timestamp,
+        "notification_id": notification_id,
+        "recipient": payload.recipient,
+        "channel": payload.channel.value,
+        "title": payload.title,
+        "body": payload.body,
+        "status": "sent" if NOTIFY_PROVIDER_TOKEN != "mock_secret_token_abcd1234" else "mocked",
         "created_at": created_at,
     }
-    READINGS.append(item)
+    NOTIFICATIONS_LOG.append(item)
 
-    return SensorReadingCreated(
-        reading_id=reading_id,
-        device_id=payload.device_id,
-        metric=payload.metric,
-        accepted=True,
+    return NotificationCreatedResponse(
+        notification_id=notification_id,
+        recipient=payload.recipient,
+        channel=payload.channel,
+        status=item["status"],
         created_at=created_at,
     )
 
 
-@app.get("/readings/latest", dependencies=[Depends(verify_bearer_token)])
-def latest_readings(
-    device_id: Optional[str] = Query(default=None),
+@app.get("/api/v1/notifications/history", dependencies=[Depends(verify_bearer_token)])
+def get_notification_history(
+    channel: Optional[NotificationChannel] = Query(default=None),
     limit: int = Query(default=10, ge=1, le=100),
 ) -> Dict[str, List[Dict]]:
-    items = READINGS
+    items = NOTIFICATIONS_LOG
 
-    if device_id:
-        items = [item for item in items if item["device_id"] == device_id]
+    if channel:
+        items = [item for item in items if item["channel"] == channel.value]
 
     return {"items": items[-limit:]}
 
 
-@app.get("/readings/{reading_id}", dependencies=[Depends(verify_bearer_token)])
-def get_reading(reading_id: str) -> Dict:
-    for item in READINGS:
-        if item["reading_id"] == reading_id:
+@app.get("/api/v1/notifications/{notification_id}", dependencies=[Depends(verify_bearer_token)])
+def get_single_notification(notification_id: str) -> Dict:
+    for item in NOTIFICATIONS_LOG:
+        if item["notification_id"] == notification_id:
             return item
 
     raise HTTPException(
@@ -258,8 +242,8 @@ def get_reading(reading_id: str) -> Dict:
         detail=build_problem(
             status_code=status.HTTP_404_NOT_FOUND,
             title="Not Found",
-            detail=f"Reading {reading_id} does not exist",
-            instance=f"/readings/{reading_id}",
+            detail=f"Notification with ID {notification_id} does not exist",
+            instance=f"/api/v1/notifications/{notification_id}",
             problem_type="https://smart-campus.local/problems/not-found",
         ),
     )
